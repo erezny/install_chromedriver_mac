@@ -8,11 +8,22 @@ require 'open-uri'
 require 'tmpdir'
 
 # https://github.com/GoogleChromeLabs/chrome-for-testing
-VERSIONS_URL = 'https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json'
+KNOWN_GOOD_VERSIONS_URL = 'https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json'
 PLATFORM = 'mac-arm64'
+CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 OPT_DIR = File.expand_path('opt', __dir__)
 BIN_DIR = File.expand_path('bin', __dir__)
 SYMLINK_PATH = File.join(BIN_DIR, 'chromedriver')
+
+def get_installed_chrome_version
+  output = `"#{CHROME_PATH}" --version 2>/dev/null`.strip
+  raise "Chrome not found at #{CHROME_PATH}" if output.empty?
+
+  match = output.match(/Google Chrome (\d+\.\d+\.\d+\.\d+)/)
+  raise "Could not parse Chrome version from: #{output}" unless match
+
+  match[1]
+end
 
 def fetch_json(url)
   uri = URI.parse(url)
@@ -25,20 +36,25 @@ def fetch_json(url)
   JSON.parse(response.body)
 end
 
-def find_chromedriver_url(data, platform)
-  stable = data.dig('channels', 'Stable')
-  raise "Stable channel not found" unless stable
+def find_chromedriver_for_version(data, chrome_version, platform)
+  versions = data['versions']
+  raise "No versions found in data" unless versions
 
-  chromedriver_downloads = stable.dig('downloads', 'chromedriver')
-  raise "Chromedriver downloads not found" unless chromedriver_downloads
+  chrome_major = chrome_version.split('.').first.to_i
 
+  candidates = versions.select do |v|
+    v['version'].split('.').first.to_i == chrome_major &&
+      v.dig('downloads', 'chromedriver')
+  end
+
+  raise "No chromedriver found for Chrome major version #{chrome_major}" if candidates.empty?
+
+  best = candidates.max_by { |v| Gem::Version.new(v['version']) }
+  chromedriver_downloads = best.dig('downloads', 'chromedriver')
   entry = chromedriver_downloads.find { |d| d['platform'] == platform }
   raise "Platform #{platform} not found" unless entry
 
-  version = stable['version']
-  url = entry['url']
-
-  [version, url]
+  [best['version'], entry['url']]
 end
 
 def download_file(url, dest_path)
@@ -70,11 +86,14 @@ def create_symlink(source, dest)
 end
 
 def main
-  puts "Fetching version info..."
-  data = fetch_json(VERSIONS_URL)
+  chrome_version = get_installed_chrome_version
+  puts "Installed Chrome: #{chrome_version}"
 
-  version, url = find_chromedriver_url(data, PLATFORM)
-  puts "Found chromedriver version #{version} for #{PLATFORM}"
+  puts "Fetching version info..."
+  data = fetch_json(KNOWN_GOOD_VERSIONS_URL)
+
+  version, url = find_chromedriver_for_version(data, chrome_version, PLATFORM)
+  puts "Found chromedriver #{version} for Chrome #{chrome_version.split('.').first}.x"
 
   versioned_dir = File.join(OPT_DIR, "chromedriver-#{version}")
 
